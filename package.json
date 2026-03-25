@@ -1,0 +1,18 @@
+{
+  "name": "worktree-mngr",
+  "version": "1.0.0",
+  "description": "Interactive git worktree switcher using fzf",
+  "type": "module",
+  "bin": {
+    "worktrees": "./bin/worktrees.mjs"
+  },
+  "files": [
+    "bin/",
+    "wt.sh",
+    ".wtrc.example.json"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,8 @@
+{
+  "reposDir": "./repos",
+  "worktreesDir": "./worktrees",
+  "commands": {
+    "frontend": "pnpm i && pnpm start",
+    "api": "bundle install && rails s"
+  }
+}
