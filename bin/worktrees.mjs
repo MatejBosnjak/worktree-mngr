@@ -17,9 +17,10 @@
  */
 
 import { execSync, spawn } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync, statSync, watch, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, statSync, watch, existsSync, unlinkSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 
 // --- Path constants ---
 const SCRIPT_PATH = new URL(import.meta.url).pathname;
@@ -35,6 +36,12 @@ const repoFilter = filterIdx !== -1 ? process.argv[filterIdx + 1] : null;
 const cwdIdx = process.argv.indexOf('--cwd');
 const activeCwd = cwdIdx !== -1 ? process.argv[cwdIdx + 1] : process.cwd();
 const getCommandIdx = process.argv.indexOf('--get-command');
+const cycleTabIdx = process.argv.indexOf('--cycle-tab');
+const tabFileIdx = process.argv.indexOf('--tab-file');
+const tabFile = tabFileIdx !== -1 ? process.argv[tabFileIdx + 1] : null;
+const listConfigMode = process.argv.includes('--list-config');
+const editCommandIdx = process.argv.indexOf('--edit-command');
+const handleEnterMode = process.argv.includes('--handle-enter');
 
 // --- ANSI color helpers ---
 const c = {
@@ -46,6 +53,9 @@ const c = {
   yellow: '\x1b[33m',
   magenta: '\x1b[35m',
   white: '\x1b[37m',
+  bgCyan: '\x1b[46m',
+  black: '\x1b[30m',
+  blue: '\x1b[34m',
 };
 
 // --- Config discovery ---
@@ -179,6 +189,151 @@ if (getCommandIdx !== -1) {
   const repo = process.argv[getCommandIdx + 1];
   const cmd = cfg.commands?.[repo];
   if (cmd) process.stdout.write(cmd);
+  process.exit(0);
+}
+
+// --- --preview-command: formatted command preview for fzf footer ---
+const previewCmdIdx = process.argv.indexOf('--preview-command');
+if (previewCmdIdx !== -1) {
+  const repo = process.argv[previewCmdIdx + 1];
+  const hints = repo === 'CONFIG'
+    ? `${c.cyan}Enter${c.reset} ${c.dim}edit${c.reset}`
+    : `${c.cyan}Enter${c.reset} ${c.dim}open${c.reset}  ${c.green}Ctrl-O${c.reset} ${c.dim}skip cmd${c.reset}  ${c.magenta}BS${c.reset} ${c.dim}delete${c.reset}`;
+
+  if (repo === 'CONFIG') {
+    process.stdout.write(`${hints}`);
+  } else {
+    const cmd = cfg.commands?.[repo];
+    const cmdLine = cmd
+      ? `${c.yellow}\u25b6 ${cmd}${c.reset}`
+      : `${c.dim}no command configured${c.reset}`;
+    process.stdout.write(`${cmdLine}\n${hints}`);
+  }
+  process.exit(0);
+}
+
+const CONFIG_TAB = '\u2699 config';
+
+// --- --list-config: repo list for config tab ---
+if (listConfigMode) {
+  for (const name of getRepoNames()) {
+    const cmd = cfg.commands?.[name];
+    const cmdDisplay = cmd
+      ? `${c.green}${cmd}${c.reset}`
+      : `${c.dim}(no command)${c.reset}`;
+    console.log(`  ${c.cyan}${name.padEnd(18)}${c.reset} ${cmdDisplay}\tCONFIG\t${name}`);
+  }
+  process.exit(0);
+}
+
+// --- --edit-command: inline command editor for a repo ---
+if (editCommandIdx !== -1) {
+  const repo = process.argv[editCommandIdx + 1];
+  const currentCmd = cfg.commands?.[repo] || '';
+  process.stderr.write(
+    `\n${c.cyan}${repo}${c.reset} — current: ${currentCmd ? `${c.green}${currentCmd}${c.reset}` : `${c.dim}(none)${c.reset}`}\n`,
+  );
+  process.stderr.write(`${c.dim}Enter new command (empty to remove, Esc to cancel):${c.reset}\n`);
+
+  let answer;
+  try {
+    answer = await rawPrompt(`${c.yellow}> ${c.reset}`);
+  } catch {
+    process.stderr.write(`${c.dim}Cancelled.${c.reset}\n`);
+    process.exit(0);
+  }
+
+  const trimmed = answer.trim();
+  const commands = { ...cfg.commands };
+  if (trimmed) {
+    commands[repo] = trimmed;
+  } else {
+    delete commands[repo];
+  }
+  saveCommands(configPath, commands);
+  process.stderr.write(
+    trimmed
+      ? `${c.green}Saved: ${repo} → ${trimmed}${c.reset}\n`
+      : `${c.dim}Removed command for ${repo}${c.reset}\n`,
+  );
+  process.exit(0);
+}
+
+// --- --handle-enter: transform action based on current tab ---
+if (handleEnterMode && tabFile) {
+  const tabs = ['ALL', ...getRepoNames(), CONFIG_TAB];
+  let idx = 0;
+  try { idx = parseInt(readFileSync(tabFile, 'utf-8').trim(), 10) || 0; } catch {}
+
+  if (tabs[idx] === CONFIG_TAB) {
+    // Config mode: edit command, then reload config list
+    const listConfigCmd = `node '${SCRIPT_PATH}' --list-config`;
+    process.stdout.write(
+      `execute(node '${SCRIPT_PATH}' --edit-command {3})+reload(${listConfigCmd})`,
+    );
+  } else {
+    // Normal mode: accept selection
+    process.stdout.write('accept');
+  }
+  process.exit(0);
+}
+
+// --- Repo list helper (for tabs) ---
+function getRepoNames() {
+  return readdirSync(REPOS_DIR)
+    .filter((name) => {
+      const p = join(REPOS_DIR, name);
+      return statSync(p).isDirectory() && isGitRepo(p);
+    })
+    .sort();
+}
+
+// --- Tab bar renderer ---
+function renderTabBar(tabs, activeIdx) {
+  const isConfig = (t) => t.includes('config');
+  const parts = tabs.map((t, i) => {
+    if (i === activeIdx) return `${c.bgCyan}${c.bold}${c.black} ${t} ${c.reset}`;
+    if (isConfig(t)) return `${c.yellow} ${t} ${c.reset}`;
+    return `${c.dim} ${t} ${c.reset}`;
+  });
+  const bar = parts.join(`${c.dim}│${c.reset}`);
+  const nav = `  ${c.yellow}◀ ▶${c.reset} ${c.dim}tabs${c.reset}`;
+  return `${bar}${nav}`;
+}
+
+// --- --cycle-tab: advance tab index, output fzf transform actions ---
+if (cycleTabIdx !== -1 && tabFile) {
+  const direction = process.argv[cycleTabIdx + 1]; // 'right', 'left', or 'init'
+  const tabs = ['ALL', ...getRepoNames(), CONFIG_TAB];
+  let idx = 0;
+  try { idx = parseInt(readFileSync(tabFile, 'utf-8').trim(), 10) || 0; } catch {}
+
+  if (direction === 'right') idx++;
+  else if (direction === 'left') idx--;
+  // 'init' — no change
+
+  if (idx < 0) idx = tabs.length - 1;
+  if (idx >= tabs.length) idx = 0;
+
+  const selectedTab = tabs[idx];
+  const cwdArg = ` --cwd '${activeCwd}'`;
+
+  // Config tab: swap list to repos+commands
+  if (selectedTab === CONFIG_TAB) {
+    writeFileSync(tabFile, String(idx));
+    const reloadCmd = `node '${SCRIPT_PATH}' --list-config`;
+    const header = renderTabBar(tabs, idx);
+    process.stdout.write(`reload(${reloadCmd})+change-header(${header})`);
+    process.exit(0);
+  }
+
+  writeFileSync(tabFile, String(idx));
+
+  const filterArg = selectedTab === 'ALL' ? '' : ` --filter '${selectedTab}'`;
+  const reloadCmd = `node '${SCRIPT_PATH}' --list-fzf${filterArg}${cwdArg}`;
+  const header = renderTabBar(tabs, idx);
+
+  process.stdout.write(`reload(${reloadCmd})+change-header(${header})`);
   process.exit(0);
 }
 
@@ -492,6 +647,13 @@ if (watchMode) {
   const reloadCmd = `node '${SCRIPT_PATH}' --list-fzf${filterArg}${cwdArg}`;
   const port = 10000 + Math.floor(Math.random() * 50000);
 
+  // Tab navigation temp file
+  const tabTmpFile = join(tmpdir(), `wt-tabs-${process.pid}`);
+  writeFileSync(tabTmpFile, '0');
+
+  const cycleCmd = (dir) =>
+    `node '${SCRIPT_PATH}' --cycle-tab ${dir} --tab-file '${tabTmpFile}' --cwd '${activeCwd}'`;
+
   try {
     const watchArgs = [SCRIPT_PATH, '--watch', String(port), '--cwd', activeCwd];
     if (repoFilter) watchArgs.push('--filter', repoFilter);
@@ -501,6 +663,8 @@ if (watchMode) {
     });
     watcher.unref();
 
+    const enterCmd = `node '${SCRIPT_PATH}' --handle-enter --tab-file '${tabTmpFile}' --cwd '${activeCwd}'`;
+
     const selected = execSync(
       `node '${SCRIPT_PATH}' --list-fzf${filterArg}${cwdArg} | fzf \
         --height=40% \
@@ -508,12 +672,18 @@ if (watchMode) {
         --ansi \
         --delimiter='\t' \
         --with-nth=1 \
-        --header=$'\x1b[2m  REPO               BRANCH                                         DIR  (Ctrl-O: skip cmd, BS: delete)\x1b[0m' \
+        --header=' ' \
+        --preview="node '${SCRIPT_PATH}' --preview-command {3}" \
+        --preview-window='bottom,2,border-top' \
         --listen=${port} \
+        --bind="start:transform(${cycleCmd('init')})" \
         --bind="ctrl-r:reload(${reloadCmd})" \
         --bind='ctrl-o:become(printf "SKIP\\t%s\\t%s" {2} {3})' \
         --bind="bs:execute(node '${SCRIPT_PATH}' --delete {2})+reload(${reloadCmd})" \
-        --bind="change:first"`,
+        --bind="change:first" \
+        --bind="right:transform(${cycleCmd('right')})" \
+        --bind="left:transform(${cycleCmd('left')})" \
+        --bind="enter:transform(${enterCmd})"`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'inherit'] },
     ).trim();
 
@@ -527,6 +697,8 @@ if (watchMode) {
 
     try { process.kill(-watcher.pid); } catch {}
   } catch {
-    process.exit(1);
+    // noop — user cancelled or fzf error
+  } finally {
+    try { unlinkSync(tabTmpFile); } catch {}
   }
 }
