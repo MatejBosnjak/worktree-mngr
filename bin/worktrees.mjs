@@ -42,6 +42,8 @@ const tabFile = tabFileIdx !== -1 ? process.argv[tabFileIdx + 1] : null;
 const listConfigMode = process.argv.includes('--list-config');
 const editCommandIdx = process.argv.indexOf('--edit-command');
 const handleEnterMode = process.argv.includes('--handle-enter');
+const handleDeleteMode = process.argv.includes('--handle-delete');
+const handleSkipMode = process.argv.includes('--handle-skip');
 
 // --- ANSI color helpers ---
 const c = {
@@ -196,17 +198,23 @@ if (getCommandIdx !== -1) {
 const previewCmdIdx = process.argv.indexOf('--preview-command');
 if (previewCmdIdx !== -1) {
   const repo = process.argv[previewCmdIdx + 1];
-  const hints = repo === 'CONFIG'
-    ? `${c.cyan}Enter${c.reset} ${c.dim}edit${c.reset}`
-    : `${c.cyan}Enter${c.reset} ${c.dim}open${c.reset}  ${c.green}Ctrl-O${c.reset} ${c.dim}skip cmd${c.reset}  ${c.magenta}BS${c.reset} ${c.dim}delete${c.reset}`;
+  const ctxIdx = process.argv.indexOf('--context');
+  const ctx = ctxIdx !== -1 ? process.argv[ctxIdx + 1] : null;
+  const isConfig = ctx === 'CONFIG';
 
-  if (repo === 'CONFIG') {
-    process.stdout.write(`${hints}`);
+  if (isConfig) {
+    const cmd = cfg.commands?.[repo];
+    const cmdLine = cmd
+      ? `${c.yellow}\u25b6 ${cmd}${c.reset}`
+      : `${c.dim}no command configured${c.reset}`;
+    const hints = `${c.cyan}Enter${c.reset} ${c.dim}edit${c.reset}`;
+    process.stdout.write(`${cmdLine}\n${hints}`);
   } else {
     const cmd = cfg.commands?.[repo];
     const cmdLine = cmd
       ? `${c.yellow}\u25b6 ${cmd}${c.reset}`
       : `${c.dim}no command configured${c.reset}`;
+    const hints = `${c.cyan}Enter${c.reset} ${c.dim}open${c.reset}  ${c.green}Ctrl-O${c.reset} ${c.dim}skip cmd${c.reset}  ${c.magenta}Ctrl-D${c.reset} ${c.dim}delete${c.reset}`;
     process.stdout.write(`${cmdLine}\n${hints}`);
   }
   process.exit(0);
@@ -256,6 +264,39 @@ if (editCommandIdx !== -1) {
       ? `${c.green}Saved: ${repo} → ${trimmed}${c.reset}\n`
       : `${c.dim}Removed command for ${repo}${c.reset}\n`,
   );
+  process.exit(0);
+}
+
+// --- --handle-delete: transform action for BS key (skip on config tab) ---
+if (handleDeleteMode && tabFile) {
+  const tabs = ['ALL', ...getRepoNames(), CONFIG_TAB];
+  let idx = 0;
+  try { idx = parseInt(readFileSync(tabFile, 'utf-8').trim(), 10) || 0; } catch {}
+
+  if (tabs[idx] === CONFIG_TAB) {
+    // Config mode: no-op
+    process.stdout.write('');
+  } else {
+    const selectedTab = tabs[idx];
+    const filterArg = selectedTab === 'ALL' ? '' : ` --filter '${selectedTab}'`;
+    const cwdArg = ` --cwd '${activeCwd}'`;
+    const reloadCmd = `node '${SCRIPT_PATH}' --list-fzf${filterArg}${cwdArg}`;
+    process.stdout.write(
+      `execute(node '${SCRIPT_PATH}' --delete {2})+reload(${reloadCmd})`,
+    );
+  }
+  process.exit(0);
+}
+
+// --- --handle-skip: transform action for Ctrl-O (no-op on config tab) ---
+if (handleSkipMode && tabFile) {
+  const tabs = ['ALL', ...getRepoNames(), CONFIG_TAB];
+  let idx = 0;
+  try { idx = parseInt(readFileSync(tabFile, 'utf-8').trim(), 10) || 0; } catch {}
+
+  if (tabs[idx] !== CONFIG_TAB) {
+    process.stdout.write('become(printf "SKIP\\t%s\\t%s" {2} {3})');
+  }
   process.exit(0);
 }
 
@@ -443,12 +484,28 @@ if (listOnly) {
   process.exit(0);
 }
 
+// --- wait for any key (used to keep messages visible inside fzf execute) ---
+function waitForKey(msg) {
+  return new Promise((resolve) => {
+    process.stderr.write(`\n${c.dim}${msg || 'Press any key to continue...'}${c.reset}`);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf-8');
+    process.stdin.once('data', () => {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      resolve();
+    });
+  });
+}
+
 // --- --delete ---
 const deleteIdx = process.argv.indexOf('--delete');
 if (deleteIdx !== -1) {
   const wtPath = process.argv[deleteIdx + 1];
   if (!wtPath) {
     process.stderr.write(`${c.yellow}No worktree path provided.${c.reset}\n`);
+    await waitForKey();
     process.exit(1);
   }
 
@@ -460,6 +517,7 @@ if (deleteIdx !== -1) {
 
   if (!repoName) {
     process.stderr.write(`${c.yellow}Worktree not found: ${wtPath}${c.reset}\n`);
+    await waitForKey();
     process.exit(1);
   }
 
@@ -467,6 +525,7 @@ if (deleteIdx !== -1) {
 
   if (wtPath === repoPath) {
     process.stderr.write(`${c.yellow}Cannot delete base repo checkout.${c.reset}\n`);
+    await waitForKey();
     process.exit(1);
   }
 
@@ -673,13 +732,13 @@ if (watchMode) {
         --delimiter='\t' \
         --with-nth=1 \
         --header=' ' \
-        --preview="node '${SCRIPT_PATH}' --preview-command {3}" \
+        --preview="node '${SCRIPT_PATH}' --preview-command {3} --context {2}" \
         --preview-window='bottom,2,border-top' \
         --listen=${port} \
         --bind="start:transform(${cycleCmd('init')})" \
         --bind="ctrl-r:reload(${reloadCmd})" \
-        --bind='ctrl-o:become(printf "SKIP\\t%s\\t%s" {2} {3})' \
-        --bind="bs:execute(node '${SCRIPT_PATH}' --delete {2})+reload(${reloadCmd})" \
+        --bind="ctrl-o:transform(node '${SCRIPT_PATH}' --handle-skip --tab-file '${tabTmpFile}')" \
+        --bind="ctrl-d:transform(node '${SCRIPT_PATH}' --handle-delete --tab-file '${tabTmpFile}' --cwd '${activeCwd}')" \
         --bind="change:first" \
         --bind="right:transform(${cycleCmd('right')})" \
         --bind="left:transform(${cycleCmd('left')})" \
