@@ -44,6 +44,7 @@ const editCommandIdx = process.argv.indexOf('--edit-command');
 const handleEnterMode = process.argv.includes('--handle-enter');
 const handleDeleteMode = process.argv.includes('--handle-delete');
 const handleSkipMode = process.argv.includes('--handle-skip');
+const handleCodeMode = process.argv.includes('--handle-code');
 
 // --- ANSI color helpers ---
 const c = {
@@ -235,7 +236,7 @@ if (previewCmdIdx !== -1) {
     const cmdLine = cmd
       ? `${c.yellow}\u25b6 ${cmd}${c.reset}`
       : `${c.dim}no command configured${c.reset}`;
-    const hints = `${c.cyan}Enter${c.reset} ${c.dim}open${c.reset}  ${c.green}Ctrl-O${c.reset} ${c.dim}skip cmd${c.reset}  ${c.magenta}Ctrl-D${c.reset} ${c.dim}delete${c.reset}`;
+    const hints = `${c.cyan}Enter${c.reset} ${c.dim}open${c.reset}  ${c.green}Ctrl-O${c.reset} ${c.dim}skip cmd${c.reset}  ${c.blue}Ctrl-E${c.reset} ${c.dim}code .${c.reset}  ${c.magenta}Ctrl-D${c.reset} ${c.dim}delete${c.reset}`;
     process.stdout.write(`${cmdLine}\n${hints}`);
   }
   process.exit(0);
@@ -317,6 +318,18 @@ if (handleSkipMode && tabFile) {
 
   if (tabs[idx] !== CONFIG_TAB) {
     process.stdout.write('become(printf "SKIP\\t%s\\t%s" {2} {3})');
+  }
+  process.exit(0);
+}
+
+// --- --handle-code: transform action for Ctrl-. (open VS Code, no-op on config tab) ---
+if (handleCodeMode && tabFile) {
+  const tabs = ['ALL', ...getRepoNames(), CONFIG_TAB];
+  let idx = 0;
+  try { idx = parseInt(readFileSync(tabFile, 'utf-8').trim(), 10) || 0; } catch {}
+
+  if (tabs[idx] !== CONFIG_TAB) {
+    process.stdout.write('become(printf "CODE\\t%s\\t%s" {2} {3})');
   }
   process.exit(0);
 }
@@ -754,6 +767,7 @@ if (watchMode) {
         --bind="start:transform(${cycleCmd('init')})" \
         --bind="ctrl-r:reload(${reloadCmd})" \
         --bind="ctrl-o:transform(node '${SCRIPT_PATH}' --handle-skip --tab-file '${tabTmpFile}')" \
+        --bind="ctrl-e:transform(node '${SCRIPT_PATH}' --handle-code --tab-file '${tabTmpFile}')" \
         --bind="ctrl-d:transform(node '${SCRIPT_PATH}' --handle-delete --tab-file '${tabTmpFile}' --cwd '${activeCwd}')" \
         --bind="change:first" \
         --bind="right:transform(${cycleCmd('right')})" \
@@ -764,10 +778,11 @@ if (watchMode) {
 
     const parts = selected.split('\t');
     const skipCmd = parts[0] === 'SKIP';
+    const codeCmd = parts[0] === 'CODE';
     const path = parts[1];
     const repo = parts[2];
     if (path) {
-      console.log(`${path}\t${repo}\t${skipCmd ? 'skip' : ''}`);
+      console.log(`${path}\t${repo}\t${skipCmd ? 'skip' : codeCmd ? 'CODE' : ''}`);
     }
 
     try { process.kill(-watcher.pid); } catch {}

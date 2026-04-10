@@ -26,6 +26,9 @@ wt() {
   local skip=$(echo "$result" | cut -f3)
   cd "$dir" || return
 
+  # Open VS Code (Ctrl-.)
+  if [ "$skip" = "CODE" ]; then code .; return; fi
+
   # Run per-repo command (skip on Ctrl-O)
   if [ "$skip" = "skip" ]; then return; fi
   if [ -n "$repo" ]; then
