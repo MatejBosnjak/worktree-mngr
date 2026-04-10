@@ -71,6 +71,16 @@ This creates a `.wtrc.json` that tells `wt` where your repos and worktrees live:
 
 Paths are relative to the `.wtrc.json` location. The config is discovered by walking up from your current directory (like `.eslintrc`).
 
+Both `reposDir` and `worktreesDir` accept a string or an array — useful when repos and worktrees are spread across multiple directories:
+
+```json
+{
+  "reposDir": ["./work/repos", "./repos"],
+  "worktreesDir": ["./work/worktrees", "./worktrees"],
+  "commands": {}
+}
+```
+
 ### 3. Directory structure
 
 ```

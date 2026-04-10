@@ -81,9 +81,15 @@ function findConfigPath() {
 function loadConfigFile(configPath) {
   const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
   const base = dirname(configPath);
+  const rawRepoDirs = raw.reposDir || './repos';
+  const reposDirs = (Array.isArray(rawRepoDirs) ? rawRepoDirs : [rawRepoDirs]).map((d) => resolve(base, d));
+  const rawWtDirs = raw.worktreesDir || './worktrees';
+  const worktreesDirs = (Array.isArray(rawWtDirs) ? rawWtDirs : [rawWtDirs]).map((d) => resolve(base, d));
   return {
-    reposDir: resolve(base, raw.reposDir || './repos'),
-    worktreesDir: resolve(base, raw.worktreesDir || './worktrees'),
+    reposDir: reposDirs[0],
+    reposDirs,
+    worktreesDir: worktreesDirs[0],
+    worktreesDirs,
     configPath,
     commands: raw.commands || {},
   };
@@ -184,7 +190,22 @@ if (!configPath) {
 
 const cfg = loadConfigFile(configPath);
 const REPOS_DIR = cfg.reposDir;
+const REPOS_DIRS = cfg.reposDirs;
 const WORKTREES_DIR = cfg.worktreesDir;
+
+function getAllRepos() {
+  const repos = [];
+  for (const dir of REPOS_DIRS) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir).sort()) {
+      const repoPath = join(dir, name);
+      if (statSync(repoPath).isDirectory() && isGitRepo(repoPath)) {
+        repos.push({ name, repoPath });
+      }
+    }
+  }
+  return repos;
+}
 
 // --- --get-command: print command for a repo ---
 if (getCommandIdx !== -1) {
@@ -321,12 +342,14 @@ if (handleEnterMode && tabFile) {
 
 // --- Repo list helper (for tabs) ---
 function getRepoNames() {
-  return readdirSync(REPOS_DIR)
+  const seen = new Set();
+  return getAllRepos()
+    .map(({ name }) => name)
     .filter((name) => {
-      const p = join(REPOS_DIR, name);
-      return statSync(p).isDirectory() && isGitRepo(p);
-    })
-    .sort();
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
 }
 
 // --- Tab bar renderer ---
@@ -424,10 +447,8 @@ function isGitRepo(dir) {
 function getEntries() {
   const entries = [];
 
-  for (const name of readdirSync(REPOS_DIR).sort()) {
+  for (const { name, repoPath } of getAllRepos()) {
     if (repoFilter && !name.startsWith(repoFilter)) continue;
-    const repoPath = join(REPOS_DIR, name);
-    if (!statSync(repoPath).isDirectory() || !isGitRepo(repoPath)) continue;
 
     for (const wt of getWorktrees(repoPath)) {
       const isMain = wt.path === repoPath;
@@ -509,19 +530,17 @@ if (deleteIdx !== -1) {
     process.exit(1);
   }
 
-  const repoName = readdirSync(REPOS_DIR).find((name) => {
-    const repoPath = join(REPOS_DIR, name);
-    if (!statSync(repoPath).isDirectory() || !isGitRepo(repoPath)) return false;
-    return getWorktrees(repoPath).some((wt) => wt.path === wtPath);
-  });
+  const found = getAllRepos().find(({ repoPath }) =>
+    getWorktrees(repoPath).some((wt) => wt.path === wtPath),
+  );
 
-  if (!repoName) {
+  if (!found) {
     process.stderr.write(`${c.yellow}Worktree not found: ${wtPath}${c.reset}\n`);
     await waitForKey();
     process.exit(1);
   }
 
-  const repoPath = join(REPOS_DIR, repoName);
+  const { name: repoName, repoPath } = found;
 
   if (wtPath === repoPath) {
     process.stderr.write(`${c.yellow}Cannot delete base repo checkout.${c.reset}\n`);
@@ -578,12 +597,7 @@ if (deleteIdx !== -1) {
 
 // --- --config: interactive editor ---
 if (configMode) {
-  const repos = readdirSync(REPOS_DIR)
-    .filter((name) => {
-      const p = join(REPOS_DIR, name);
-      return statSync(p).isDirectory() && isGitRepo(p);
-    })
-    .sort();
+  const repos = getAllRepos().map(({ name }) => name);
 
   while (true) {
     const currentCfg = loadConfigFile(configPath);
@@ -684,15 +698,17 @@ if (watchMode) {
     for (const w of watchers) w.close();
   }
 
-  for (const name of readdirSync(REPOS_DIR)) {
-    const wtMetaDir = join(REPOS_DIR, name, '.git', 'worktrees');
+  for (const { repoPath } of getAllRepos()) {
+    const wtMetaDir = join(repoPath, '.git', 'worktrees');
     if (existsSync(wtMetaDir)) {
       watchers.push(watch(wtMetaDir, triggerReload));
     }
   }
 
-  if (existsSync(WORKTREES_DIR)) {
-    watchers.push(watch(WORKTREES_DIR, triggerReload));
+  for (const wtDir of cfg.worktreesDirs) {
+    if (existsSync(wtDir)) {
+      watchers.push(watch(wtDir, triggerReload));
+    }
   }
 
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
