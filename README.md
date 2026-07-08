@@ -12,6 +12,7 @@ A terminal tool for navigating git worktrees across multiple repositories using 
 - **Sorted by recency** — worktrees with the most recent activity appear first
 - **Per-repo commands** — configure commands (e.g. `pnpm i && pnpm start`) that run automatically after switching
 - **Worktree deletion** — delete worktrees from the picker with confirmation
+- **Cleanup mode** — `Ctrl-X` opens a "red alert" cleanup view that flags each worktree as merged / upstream-gone / dirty / unmerged, with age; multi-select and bulk-remove stale worktrees, sweep all safe ones at once, and filter by status
 - **Interactive config editor** — `wt -config` lets you browse repos and set commands via a TUI
 - **Zero dependencies** — only Node.js builtins + fzf
 
@@ -129,8 +130,40 @@ Or edit `.wtrc.json` directly:
 | `Enter` | Select worktree, cd into it, and run configured command |
 | `Ctrl-O` | Select worktree and cd without running the command |
 | `Backspace` | Delete the highlighted worktree (with confirmation) |
+| `Ctrl-X` | Enter **cleanup mode** (see below) |
 | `Ctrl-R` | Force refresh the list |
 | `Esc` | Cancel |
+
+### Cleanup mode (`Ctrl-X`)
+
+Cleanup mode turns the picker into a "red alert" view for pruning stale worktrees. Every worktree is scanned and badged by status, sorted safest-and-oldest first:
+
+| Badge | Meaning |
+|---|---|
+| `✓ merged` | Branch is merged into the repo's default branch — safe to remove |
+| `⬆ gone` | The branch's upstream was deleted (PR merged, incl. squash/rebase) — safe to remove. Reflects the last `Ctrl-F` refresh |
+| `● dirty` | Uncommitted/untracked changes — removing loses that work (needs an extra confirm) |
+| `⚠ unmerged` | Not merged and upstream still present — the branch is kept when you remove the worktree, so commits aren't lost |
+
+Detection is fast (a single `git branch --merged` + `git for-each-ref` per repo; the per-worktree dirty scan runs in parallel and lazily, so the list appears in ~1s and dirty fills in after). Entering cleanup runs `git worktree prune` first to drop stale metadata.
+
+| Key | Action |
+|---|---|
+| `Tab` | Mark / unmark a worktree |
+| `Ctrl-A` | Select all |
+| `Enter` | Remove marked worktrees (or the focused one) with a summary confirm; dirty ones need a separate force confirm |
+| `Ctrl-D` | Remove the focused worktree |
+| `Ctrl-G` | **Sweep** — remove every merged/gone clean worktree in the current tab's scope (one repo, or all repos on the `ALL` tab) |
+| `Ctrl-S` | Cycle the status filter (`All → Safe → Merged → Gone → Dirty → Unmerged`) |
+| `⌥1`–`⌥5` / `⌥0` | Jump the filter to merged / gone / dirty / unmerged / safe / all |
+| `Ctrl-F` | Fetch `--prune` across repos so `⬆ gone` is accurate |
+| `?` | Show the badge + key guide |
+| `◀ ▶` | Switch repo tab (the status filter persists) |
+| `Ctrl-X` | Exit cleanup mode |
+
+**Safe** = merged/gone **and** clean — the set `Ctrl-G` sweeps. The status filter persists across tab switches; the footer always shows the total per-status counts.
+
+**Deleting leftover branches.** Removing a worktree keeps its local branch. The removal confirm shows each branch's fate (`+ branch -d` for merged, `-D !` for gone/unmerged, `branch kept` for dirty), and after removal you're asked whether to delete them: `Y` deletes the merged ones safely (`git branch -d`), `F` also force-deletes the gone/unmerged ones (`git branch -D`, which can drop local-only commits — e.g. the original commits of a squash-merged branch). The default keeps every branch, so the tool never deletes commit history unless you ask.
 
 ### Config editor (`wt -config`)
 
