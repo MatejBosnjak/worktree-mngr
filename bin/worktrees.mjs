@@ -16,7 +16,7 @@
  *   source "/path/to/wt.sh"
  */
 
-import { execSync, exec, spawn } from 'node:child_process';
+import { execSync, execFileSync, exec, spawn } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync, renameSync, statSync, watch, existsSync, unlinkSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -56,6 +56,7 @@ const handleSweepMode = process.argv.includes('--handle-sweep');
 const spinnerMode = process.argv.includes('--spinner');
 const handleLoadMode = process.argv.includes('--handle-load');
 const handleStatusIdx = process.argv.indexOf('--handle-status');
+const handleSelectAllMode = process.argv.includes('--handle-select-all');
 
 // --- ANSI color helpers ---
 const c = {
@@ -440,8 +441,10 @@ if (handleEnterMode && tabFile) {
       `execute(node '${SCRIPT_PATH}' --edit-command {3})+reload(${listConfigCmd})`,
     );
   } else {
-    // Normal mode: accept selection
-    process.stdout.write('accept');
+    // Normal mode: accept the focused row. clear-selection first so any marks
+    // made with Tab (--multi is on session-wide) don't turn Enter into a
+    // multi-accept whose extras the result parser would silently drop.
+    process.stdout.write('clear-selection+accept');
   }
   process.exit(0);
 }
@@ -680,6 +683,13 @@ if (handleStatusIdx !== -1 && tabFile) {
   process.exit(0);
 }
 
+// --- --handle-select-all: Ctrl-A means select-all in cleanup, but keep fzf's
+// default readline "beginning-of-line" in normal mode (binds are session-wide) ---
+if (handleSelectAllMode && tabFile) {
+  process.stdout.write(readState(tabFile).cleanup ? 'select-all+refresh-preview' : 'beginning-of-line');
+  process.exit(0);
+}
+
 // --- --spinner: loading placeholder shown while a cleanup list rebuilds ---
 if (spinnerMode) {
   const scopeIdx = process.argv.indexOf('--scope');
@@ -858,9 +868,16 @@ function writeState(file, { idx, cleanup, pending, ts, filter }) {
   if (filter === undefined) {
     try { filter = readState(file).filter; } catch { filter = 'all'; }
   }
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, `${idx}\n${cleanup ? '1' : '0'}\n${pending || 0}\n${ts ?? Date.now()}\n${filter}`);
-  renameSync(tmp, file);
+  // Per-PID temp path + rename = atomic, and unique so concurrent writers (the
+  // background --watch animator vs. per-keypress handlers) never clobber each
+  // other's temp file or race the rename into an uncaught ENOENT.
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, `${idx}\n${cleanup ? '1' : '0'}\n${pending || 0}\n${ts ?? Date.now()}\n${filter}`);
+    renameSync(tmp, file);
+  } catch {
+    try { unlinkSync(tmp); } catch {}
+  }
 }
 
 // --- Cleanup detection helpers ---
@@ -874,7 +891,7 @@ function getDefaultBranch(repoPath) {
   } catch {}
   for (const cand of ['develop', 'main', 'master']) {
     try {
-      execSync(`git rev-parse --verify --quiet origin/${cand}`, {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', `origin/${cand}`], {
         cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'],
       });
       return cand;
@@ -905,8 +922,10 @@ function getRefInfo(repoPath) {
 function getMergedSet(repoPath, defaultBranch) {
   const set = new Set();
   try {
-    const out = execSync(
-      `git branch --merged origin/${defaultBranch} --format '%(refname:short)'`,
+    // execFileSync (no shell) — defaultBranch is interpolated into an arg, never a shell string.
+    const out = execFileSync(
+      'git',
+      ['branch', '--merged', `origin/${defaultBranch}`, '--format', '%(refname:short)'],
       { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
     );
     for (const line of out.split('\n')) {
@@ -1090,10 +1109,14 @@ async function getCleanupEntries(repos, withDirty = false, statusFilter = 'all',
       unmerged: entries.filter((e) => e.rank === 1).length,
       dirty: entries.filter((e) => e.rank === 2).length,
     };
+    // Atomic + per-PID temp so concurrent list writers never clobber it.
+    const ctmp = `${countsFile}.${process.pid}.tmp`;
     try {
-      writeFileSync(`${countsFile}.tmp`, JSON.stringify(counts));
-      renameSync(`${countsFile}.tmp`, countsFile);
-    } catch {}
+      writeFileSync(ctmp, JSON.stringify(counts));
+      renameSync(ctmp, countsFile);
+    } catch {
+      try { unlinkSync(ctmp); } catch {}
+    }
   }
 
   const f = STATUS_FILTERS.find((x) => x.value === statusFilter) || STATUS_FILTERS[0];
@@ -1190,7 +1213,7 @@ if (deleteIdx !== -1) {
       }
 
       try {
-        execSync(`git worktree remove ${JSON.stringify(wtPath)}`, {
+        execFileSync('git', ['worktree', 'remove', wtPath], {
           cwd: repoPath,
           encoding: 'utf-8',
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -1293,10 +1316,12 @@ if (bulkDeleteMode) {
     (dirty.length ? `, ${c.red}${dirty.length} with uncommitted changes${c.reset}` : '') + '\n',
   );
 
+  // execFileSync (no shell) — branch names and paths are passed as argv, so a
+  // ref/dir name containing shell metacharacters ($ ` ; | ( )) can't be executed.
   const removed = [];
   const removeOne = (i, force) => {
     try {
-      execSync(`git worktree remove${force ? ' --force' : ''} ${JSON.stringify(i.wtPath)}`, {
+      execFileSync('git', ['worktree', 'remove', ...(force ? ['--force'] : []), i.wtPath], {
         cwd: i.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
       });
       removed.push(i);
@@ -1308,7 +1333,7 @@ if (bulkDeleteMode) {
   };
   const removeBranch = (i, force) => {
     try {
-      execSync(`git branch ${force ? '-D' : '-d'} ${JSON.stringify(i.branch)}`, {
+      execFileSync('git', ['branch', force ? '-D' : '-d', i.branch], {
         cwd: i.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
       });
       process.stderr.write(`  ${c.green}✓ branch deleted${c.reset} ${c.dim}${i.branch}${c.reset}\n`);
@@ -1591,7 +1616,7 @@ if (watchMode) {
         --bind="alt-4:transform(node '${SCRIPT_PATH}' --handle-status unmerged --tab-file '${tabTmpFile}' --cwd '${activeCwd}')" \
         --bind="alt-5:transform(node '${SCRIPT_PATH}' --handle-status safe --tab-file '${tabTmpFile}' --cwd '${activeCwd}')" \
         --bind="?:transform(node '${SCRIPT_PATH}' --handle-help --tab-file '${tabTmpFile}')" \
-        --bind="ctrl-a:select-all+refresh-preview" \
+        --bind="ctrl-a:transform(node '${SCRIPT_PATH}' --handle-select-all --tab-file '${tabTmpFile}')" \
         --bind="tab:toggle+down+refresh-preview" \
         --bind="shift-tab:toggle+up+refresh-preview" \
         --bind="ctrl-o:transform(node '${SCRIPT_PATH}' --handle-skip --tab-file '${tabTmpFile}')" \
@@ -1620,7 +1645,8 @@ if (watchMode) {
   } catch {
     // noop — user cancelled or fzf error
   } finally {
-    for (const f of [tabTmpFile, `${tabTmpFile}.tmp`, `${tabTmpFile}.counts`, `${tabTmpFile}.counts.tmp`]) {
+    // Per-PID temp files are cleaned by their writers; just drop the shared files.
+    for (const f of [tabTmpFile, `${tabTmpFile}.counts`]) {
       try { unlinkSync(f); } catch {}
     }
   }
