@@ -163,6 +163,8 @@ Detection is fast (a single `git branch --merged` + `git for-each-ref` per repo;
 
 **Safe** = merged/gone **and** clean — the set `Ctrl-G` sweeps. The status filter persists across tab switches; the footer always shows the total per-status counts.
 
+**Deleting leftover branches.** Removing a worktree keeps its local branch. The removal confirm shows each branch's fate (`+ branch -d` for merged, `-D !` for gone/unmerged, `branch kept` for dirty), and after removal you're asked whether to delete them: `Y` deletes the merged ones safely (`git branch -d`), `F` also force-deletes the gone/unmerged ones (`git branch -D`, which can drop local-only commits — e.g. the original commits of a squash-merged branch). The default keeps every branch, so the tool never deletes commit history unless you ask.
+
 ### Config editor (`wt -config`)
 
 | Key | Action |

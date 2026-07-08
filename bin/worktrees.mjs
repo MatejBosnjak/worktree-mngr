@@ -764,6 +764,11 @@ if (cleanupHelpMode) {
   L(`              current tab's scope (one repo, or all repos on the ALL tab),`);
   L(`              behind a single confirmation. Dirty/unmerged are left alone.`);
   L('');
+  L(`  ${c.yellow}${c.bold}Branches${c.reset}    Removing a worktree keeps its branch. After a removal you're`);
+  L(`              asked whether to delete the leftover branches too:`);
+  L(`              ${c.green}Y${c.reset} deletes merged ones (safe ${c.dim}git branch -d${c.reset}); ${c.red}F${c.reset} also force-deletes`);
+  L(`              gone/unmerged ones (${c.red}-D${c.reset}, ${c.dim}drops local-only commits${c.reset}). Dirty kept.`);
+  L('');
   L(`  ${c.bold}Keys${c.reset}  ${c.cyan}Tab${c.reset} mark   ${c.green}Ctrl-A${c.reset} select all   ${c.red}${c.bold}Enter${c.reset} remove selected/focused`);
   L(`        ${c.magenta}Ctrl-D${c.reset} remove focused   ${c.green}${c.bold}Ctrl-G${c.reset} sweep safe   ${c.yellow}Ctrl-S${c.reset} filter   ${c.yellow}Ctrl-F${c.reset} refresh   ${c.yellow}Ctrl-X${c.reset} exit`);
   L('');
@@ -1225,6 +1230,15 @@ if (bulkDeleteMode) {
   });
 
   // Resolve each path to its repo/branch and classify (skip base checkouts).
+  // merged/gone drive the branch-deletion fate (merged -> safe -d, else -> -D).
+  const repoMeta = new Map();
+  const metaFor = (repoPath) => {
+    if (!repoMeta.has(repoPath)) {
+      const db = getDefaultBranch(repoPath);
+      repoMeta.set(repoPath, { mergedSet: getMergedSet(repoPath, db), refInfo: getRefInfo(repoPath) });
+    }
+    return repoMeta.get(repoPath);
+  };
   const items = [];
   for (const wtPath of paths) {
     const found = getAllRepos().find(({ repoPath }) =>
@@ -1233,7 +1247,13 @@ if (bulkDeleteMode) {
     if (!found) continue;
     if (wtPath === found.repoPath) continue; // never the base repo
     const branch = getWorktrees(found.repoPath).find((wt) => wt.path === wtPath)?.branch || '???';
-    items.push({ wtPath, repoName: found.name, repoPath: found.repoPath, branch, dirty: isDirty(wtPath) });
+    const m = metaFor(found.repoPath);
+    items.push({
+      wtPath, repoName: found.name, repoPath: found.repoPath, branch,
+      dirty: isDirty(wtPath),
+      merged: m.mergedSet.has(branch),
+      gone: (m.refInfo.get(branch)?.gone) ?? false,
+    });
   }
 
   const scopeIdx = process.argv.indexOf('--sweep-scope');
@@ -1257,9 +1277,15 @@ if (bulkDeleteMode) {
     : `Remove ${items.length} worktree${items.length > 1 ? 's' : ''}?`;
   process.stderr.write(`\n${c.bold}${heading}${c.reset}\n\n`);
   for (const i of items) {
-    const tag = i.dirty ? `${c.red}● dirty${c.reset}` : `${c.green}✓ clean${c.reset}`;
+    const tag = i.dirty ? `${c.red}● dirty ${c.reset}` : `${c.green}✓ clean ${c.reset}`;
+    // Branch fate (D): dirty -> kept; merged -> safe -d; gone/unmerged -> force -D.
+    const fate = i.dirty
+      ? `${c.dim}branch kept${c.reset}`
+      : i.merged
+        ? `${c.dim}+ branch ${c.reset}${c.green}-d${c.reset}`
+        : `${c.dim}+ branch ${c.reset}${c.red}-D !${c.reset}`;
     process.stderr.write(
-      `  ${c.cyan}${i.repoName.padEnd(14)}${c.reset} ${c.green}${i.branch.slice(0, 38).padEnd(39)}${c.reset} ${tag}\n`,
+      `  ${c.cyan}${i.repoName.padEnd(12)}${c.reset} ${c.green}${i.branch.slice(0, 32).padEnd(33)}${c.reset} ${tag}  ${fate}\n`,
     );
   }
   process.stderr.write(
@@ -1267,15 +1293,28 @@ if (bulkDeleteMode) {
     (dirty.length ? `, ${c.red}${dirty.length} with uncommitted changes${c.reset}` : '') + '\n',
   );
 
+  const removed = [];
   const removeOne = (i, force) => {
     try {
       execSync(`git worktree remove${force ? ' --force' : ''} ${JSON.stringify(i.wtPath)}`, {
         cwd: i.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
       });
+      removed.push(i);
       process.stderr.write(`  ${c.green}✓ removed${c.reset} ${c.dim}${basename(i.wtPath)}${c.reset}\n`);
     } catch (err) {
       const msg = err.stderr?.trim() || err.message;
       process.stderr.write(`  ${c.yellow}✗ ${basename(i.wtPath)}: ${msg}${c.reset}\n`);
+    }
+  };
+  const removeBranch = (i, force) => {
+    try {
+      execSync(`git branch ${force ? '-D' : '-d'} ${JSON.stringify(i.branch)}`, {
+        cwd: i.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      process.stderr.write(`  ${c.green}✓ branch deleted${c.reset} ${c.dim}${i.branch}${c.reset}\n`);
+    } catch (err) {
+      const msg = err.stderr?.trim() || err.message;
+      process.stderr.write(`  ${c.yellow}✗ branch ${i.branch}: ${msg}${c.reset}\n`);
     }
   };
 
@@ -1303,6 +1342,35 @@ if (bulkDeleteMode) {
       for (const i of dirty) removeOne(i, true);
     } else {
       process.stderr.write(`${c.dim}Kept worktrees with changes.${c.reset}\n`);
+    }
+  }
+
+  // Follow-up (A): offer to delete the leftover branches of the removed worktrees.
+  // Dirty ones are excluded (their branch is kept). merged -> safe `-d`; gone /
+  // unmerged -> `-D`, which can drop local-only commits, so it's gated on F.
+  const branchCands = removed.filter((i) => !i.dirty);
+  const safeBranches = branchCands.filter((i) => i.merged);
+  const forceBranches = branchCands.filter((i) => !i.merged);
+  if (safeBranches.length || forceBranches.length) {
+    const total = safeBranches.length + forceBranches.length;
+    const parts = [];
+    if (safeBranches.length) parts.push(`${c.green}${safeBranches.length} safe (-d)${c.reset}`);
+    if (forceBranches.length) parts.push(`${c.red}${forceBranches.length} force (-D, drops local-only commits)${c.reset}`);
+    process.stderr.write(`\n${c.bold}Also delete the ${total} leftover branch${total > 1 ? 'es' : ''}?${c.reset}  ${parts.join(', ')}\n`);
+    const hint = [];
+    if (safeBranches.length) hint.push(`${c.yellow}Y${c.reset} ${c.dim}delete safe${c.reset}`);
+    if (forceBranches.length) hint.push(`${c.red}F${c.reset} ${c.dim}${safeBranches.length ? 'also ' : ''}force-delete${c.reset}`);
+    hint.push(`${c.dim}any key keep${c.reset}`);
+    process.stderr.write(`${hint.join('   ')}: `);
+    const key = await readOneKey();
+    process.stderr.write('\n');
+    if (key === 'y') {
+      for (const i of safeBranches) removeBranch(i, false);
+    } else if (key === 'f') {
+      for (const i of safeBranches) removeBranch(i, false);
+      for (const i of forceBranches) removeBranch(i, true);
+    } else {
+      process.stderr.write(`${c.dim}Kept branches.${c.reset}\n`);
     }
   }
 
